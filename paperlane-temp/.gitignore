@@ -1,0 +1,50 @@
+# deps
+node_modules/
+.pnp
+.pnp.js
+
+# next
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+
+# env — never commit secrets
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+
+# database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+prisma/dev.db
+prisma/*.db-journal
+
+# uploads (user-generated; served from object storage in production)
+public/uploads/*
+!public/uploads/.gitkeep
+
+# logs / coverage / caches
+*.log
+npm-debug.log*
+coverage/
+.vercel
+.turbo
+.eslintcache
+tsconfig.tsbuildinfo
+
+# os / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+# Local environment secrets
+.env
+.env.*
+!.env.example

@@ -1,0 +1,29 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: file:./dev.db
+      AUTH_SECRET: ci-test-secret-change-me
+      PAYMENTS_PROVIDER: mock
+      PAYMENT_ALLOW_LIVE: "false"
+      EMAIL_PROVIDER: console
+      ANALYTICS_PROVIDER: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build

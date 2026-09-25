@@ -1,0 +1,1218 @@
+// Paperlane Books — data model
+// ---------------------------------------------------------------------------
+// Conventions:
+//  * All money is stored as INTEGER minor units ("paise" for INR). Never floats.
+//  * SQLite (dev) does not support Prisma enums, so status-like columns are
+//    Strings with values centralised in src/lib/constants.ts. This also makes
+//    the multi-tenant / multi-region future easier.
+//  * Soft deletes via `deletedAt` on catalogue + content entities.
+//  * Every table that mutates stock or money has an append-only companion log.
+//  * Postgres is a one-line change: update `datasource db.provider` + DATABASE_URL.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ===================== IDENTITY & ACCESS =====================
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  emailVerifiedAt DateTime?
+  passwordHash    String?
+  name            String
+  phone           String?
+  avatarUrl       String?
+  // Account lifecycle: active | suspended | deleted
+  status          String    @default("active")
+  roleId          String
+  role            Role      @relation(fields: [roleId], references: [id])
+
+  // Consent + preferences (stored as JSON strings for portability)
+  marketingEmailConsent Boolean @default(false)
+  marketingSmsConsent   Boolean @default(false)
+  marketingWhatsappConsent Boolean @default(false)
+  notificationPrefs     String? // JSON: { orderUpdates: true, backInStock: true, ... }
+  readingPrefs          String? // JSON: { favouriteGenres: [], formats: [], languages: [] }
+
+  lastLoginAt     DateTime?
+  failedLoginCount Int      @default(0)
+  lockedUntil     DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sessions       Session[]
+  tokens         Token[]
+  addresses      Address[]
+  carts          Cart[]
+  orders         Order[]
+  wishlist       WishlistItem[]
+  wishlistShares WishlistShare[]
+  stockAlerts    StockAlert[]
+  reviews        Review[]
+  recentlyViewed RecentlyViewed[]
+  supportTickets SupportTicket[]
+  supportMessages SupportMessage[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]
+  redemptions    CouponRedemption[]
+  newsletterSub  NewsletterSubscriber?
+  blogPosts      BlogPost[]
+  stockMovements StockMovement[]
+
+  @@index([status])
+  @@index([roleId])
+}
+
+model Role {
+  id          String       @id @default(cuid())
+  // owner | admin | inventory_manager | order_manager | content_manager | support | marketing
+  name        String       @unique
+  label       String
+  description String?
+  // JSON array of permission strings, e.g. ["book:write","order:refund"]
+  permissions String
+  isSystem    Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  users       User[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  // SHA-256 of the opaque session token. The raw token only ever lives in the
+  // HttpOnly cookie, so a DB leak cannot be replayed as a login.
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Token {
+  id        String   @id @default(cuid())
+  // SHA-256 of the emailed token.
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // email_verify | password_reset
+  type      String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, type])
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String   @default("Home")
+  fullName   String
+  phone      String
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  postalCode String
+  country    String   @default("IN")
+  isDefaultShipping Boolean @default(false)
+  isDefaultBilling  Boolean @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ===================== CATALOGUE =====================
+
+model Author {
+  id        String    @id @default(cuid())
+  slug      String    @unique
+  name      String
+  bio       String?
+  photoUrl  String?
+  nationality String?
+  birthYear Int?
+  website   String?
+  metaTitle String?
+  metaDescription String?
+  isFeatured Boolean  @default(false)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  books Book[]
+
+  @@index([name])
+  @@index([deletedAt])
+}
+
+model Publisher {
+  id        String    @id @default(cuid())
+  slug      String    @unique
+  name      String
+  description String?
+  logoUrl   String?
+  website   String?
+  metaTitle String?
+  metaDescription String?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  books Book[]
+
+  @@index([name])
+  @@index([deletedAt])
+}
+
+model Genre {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  name        String
+  description String?
+  heroImage   String?
+  parentId    String?
+  parent      Genre?    @relation("GenreTree", fields: [parentId], references: [id])
+  children    Genre[]   @relation("GenreTree")
+  sortOrder   Int       @default(0)
+  isFeatured  Boolean   @default(false)
+  metaTitle   String?
+  metaDescription String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  books       Book[]    @relation("PrimaryGenre")
+  bookLinks   BookGenre[]
+
+  @@index([parentId])
+  @@index([deletedAt])
+}
+
+model Collection {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  title       String
+  subtitle    String?
+  description String?
+  heroImage   String?
+  // manual | auto_genre | auto_bestseller | auto_new | auto_staff
+  kind        String    @default("manual")
+  autoGenreId String?
+  isFeatured  Boolean   @default(false)
+  sortOrder   Int       @default(0)
+  metaTitle   String?
+  metaDescription String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  books CollectionBook[]
+
+  @@index([deletedAt])
+}
+
+model CollectionBook {
+  collectionId String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  bookId       String
+  book         Book       @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  sortOrder    Int        @default(0)
+
+  @@id([collectionId, bookId])
+  @@index([bookId])
+}
+
+model Book {
+  id            String    @id @default(cuid())
+  slug          String    @unique
+  title         String
+  subtitle      String?
+  authorId      String
+  author        Author    @relation(fields: [authorId], references: [id])
+  publisherId   String?
+  publisher     Publisher? @relation(fields: [publisherId], references: [id])
+  genreId       String?
+  genre         Genre?    @relation("PrimaryGenre", fields: [genreId], references: [id])
+
+  isbn13        String?   @unique
+  isbn10        String?
+  edition       String?
+  language      String    @default("English")
+  // paperback | hardcover | ebook | audiobook
+  format        String    @default("paperback")
+  description   String
+  synopsis      String?
+  publicationDate DateTime?
+  pageCount     Int?
+  dimensions    String?   // "198 x 129 x 22 mm"
+  weightGrams   Int?
+  ageRangeMin   Int?
+  ageRangeMax   Int?
+
+  coverImageUrl String
+  coverAlt      String?
+
+  // Pricing — provider-agnostic, server-authoritative
+  currency       String  @default("INR")
+  pricePaise     Int     // MRP / list price in paise
+  salePricePaise Int?    // if set and < pricePaise, this is the selling price
+  // Tax category key -> resolved against TaxRate table (never hard-coded)
+  taxCategory    String  @default("books_print")
+  taxInclusive   Boolean @default(true)
+
+  // Denormalised rating aggregates, refreshed on review moderation.
+  ratingAvg      Float   @default(0)
+  ratingCount    Int     @default(0)
+  salesCount     Int     @default(0)
+  viewCount      Int     @default(0)
+
+  // draft | active | archived
+  status        String   @default("draft")
+  isFeatured    Boolean  @default(false)
+  isStaffPick   Boolean  @default(false)
+  isNewRelease  Boolean  @default(false)
+  isTrending    Boolean  @default(false)
+  publishedAt   DateTime?
+
+  metaTitle       String?
+  metaDescription String?
+  seoKeywords     String?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  images        BookImage[]
+  genreLinks    BookGenre[]
+  collections   CollectionBook[]
+  inventory     InventoryItem[]
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  reviews       Review[]
+  wishlistedBy  WishlistItem[]
+  views         RecentlyViewed[]
+  stockMovements StockMovement[]
+  stockAlerts    StockAlert[]
+  relatedFrom   BookRelation[] @relation("BookRelationFrom")
+  relatedTo     BookRelation[] @relation("BookRelationTo")
+
+  @@index([status, publishedAt])
+  @@index([authorId])
+  @@index([genreId])
+  @@index([publisherId])
+  @@index([isFeatured])
+  @@index([isStaffPick])
+  @@index([salesCount])
+  @@index([ratingAvg])
+  @@index([deletedAt])
+  @@index([title])
+}
+
+model BookImage {
+  id        String @id @default(cuid())
+  bookId    String
+  book      Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  url       String
+  alt       String
+  width     Int?
+  height    Int?
+  sortOrder Int    @default(0)
+
+  @@index([bookId])
+}
+
+model BookGenre {
+  bookId  String
+  book    Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  genreId String
+  genre   Genre  @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([bookId, genreId])
+  @@index([genreId])
+}
+
+model BookRelation {
+  id       String @id @default(cuid())
+  fromId   String
+  from     Book   @relation("BookRelationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId     String
+  to       Book   @relation("BookRelationTo", fields: [toId], references: [id], onDelete: Cascade)
+  // related | also_bought | also_viewed | fbt (frequently bought together)
+  kind     String @default("related")
+  weight   Int    @default(0)
+
+  @@unique([fromId, toId, kind])
+  @@index([toId])
+}
+
+// ===================== INVENTORY =====================
+
+model Warehouse {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  city      String
+  state     String
+  country   String  @default("IN")
+  priority  Int     @default(0)
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventory InventoryItem[]
+  movements StockMovement[]
+}
+
+model InventoryItem {
+  id        String    @id @default(cuid())
+  bookId    String
+  book      Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  warehouseId String
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  sku       String    @unique
+  isbn13    String?
+  shelf     String?
+  onHand    Int       @default(0)
+  reserved  Int       @default(0)
+  incoming  Int       @default(0)
+  damaged   Int       @default(0)
+  lost      Int       @default(0)
+  lowStockThreshold Int @default(5)
+  costPaise Int?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  movements    StockMovement[]
+  reservations StockReservation[]
+
+  @@unique([bookId, warehouseId])
+  @@index([bookId])
+  @@index([onHand])
+}
+
+model StockMovement {
+  id              String @id @default(cuid())
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  bookId          String
+  book            Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  warehouseId     String
+  warehouse       Warehouse @relation(fields: [warehouseId], references: [id])
+  // receive | reserve | release | sale | return | adjust | damage | loss | transfer_in | transfer_out | cancel
+  type            String
+  quantityDelta   Int
+  balanceAfter    Int
+  reason          String?
+  referenceType   String?
+  referenceId     String?
+  actorId         String?
+  actor           User?  @relation(fields: [actorId], references: [id])
+  createdAt       DateTime @default(now())
+
+  @@index([inventoryItemId, createdAt])
+  @@index([bookId, createdAt])
+  @@index([type])
+}
+
+model StockReservation {
+  id              String @id @default(cuid())
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  quantity        Int
+  // cart | order
+  referenceType   String
+  referenceId     String
+  expiresAt       DateTime
+  releasedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([referenceType, referenceId])
+  @@index([expiresAt])
+}
+
+// ===================== CART, WISHLIST, VIEWS =====================
+
+model Cart {
+  id        String @id @default(cuid())
+  userId    String?
+  user      User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // Opaque guest cart token so anonymous visitors keep a cart without an account.
+  guestToken String? @unique
+  currency  String @default("INR")
+  // active | converted | abandoned | merged
+  status    String @default("active")
+  couponCode String?
+  reminderSentAt DateTime?
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items CartItem[]
+
+  @@index([userId, status])
+  @@index([status, updatedAt])
+}
+
+model CartItem {
+  id        String @id @default(cuid())
+  cartId    String
+  cart      Cart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  bookId    String
+  book      Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  quantity  Int    @default(1)
+  // Price when the customer added it — used to surface "price changed" notices.
+  addedUnitPricePaise Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, bookId])
+  @@index([bookId])
+}
+
+model WishlistItem {
+  id        String @id @default(cuid())
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookId    String
+  book      Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, bookId])
+  @@index([bookId])
+}
+
+model RecentlyViewed {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestToken String?
+  bookId     String
+  book       Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  viewedAt   DateTime @default(now())
+
+  @@unique([userId, bookId])
+  @@index([guestToken])
+  @@index([viewedAt])
+}
+
+// ===================== ORDERS & PAYMENTS =====================
+
+model Order {
+  id          String @id @default(cuid())
+  orderNumber String @unique
+  userId      String?
+  user        User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Guest checkout contact details are always captured, even for signed-in users.
+  email       String
+  phone       String
+  customerName String
+
+  // pending | confirmed | cancelled
+  status            String @default("pending")
+  // unpaid | pending | paid | failed | refunded | partially_refunded
+  paymentStatus     String @default("unpaid")
+  // unfulfilled | processing | packed | shipped | delivered | cancelled | returned
+  fulfillmentStatus String @default("unfulfilled")
+
+  currency      String @default("INR")
+  subtotalPaise Int
+  discountPaise Int    @default(0)
+  taxPaise      Int    @default(0)
+  shippingPaise Int    @default(0)
+  totalPaise    Int
+  amountPaidPaise Int  @default(0)
+  amountRefundedPaise Int @default(0)
+
+  couponCode    String?
+  giftCardCode  String?
+  giftCardPaise Int    @default(0)
+
+  shippingAddress String // JSON snapshot — immutable record of where it went
+  billingAddress  String // JSON snapshot
+
+  shippingMethodId String?
+  shippingMethodLabel String?
+  carrier          String?
+  trackingNumber   String?
+  trackingUrl      String?
+  estimatedDelivery DateTime?
+
+  notes      String?
+  ipAddress  String?
+  userAgent  String?
+  /** Analytics session that produced this order — enables source attribution. */
+  sessionId  String?
+  // Sequential tax invoice number, assigned when payment is confirmed.
+  invoiceNumber String? @unique
+
+  // Guarantees a retried checkout submit cannot create a second order.
+  idempotencyKey String? @unique
+
+  placedAt    DateTime  @default(now())
+  confirmedAt DateTime?
+  cancelledAt DateTime?
+  deliveredAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  items     OrderItem[]
+  payments  Payment[]
+  refunds   Refund[]
+  shipments Shipment[]
+  events    OrderEvent[]
+  reviews   Review[]
+  tickets   SupportTicket[]
+  redemptions CouponRedemption[]
+
+  @@index([userId, placedAt])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([fulfillmentStatus])
+  @@index([email])
+  @@index([placedAt])
+  @@index([sessionId])
+}
+
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  bookId    String?
+  book      Book?  @relation(fields: [bookId], references: [id], onDelete: SetNull)
+
+  // Immutable snapshots: the invoice must never change if the catalogue does.
+  titleSnapshot  String
+  authorSnapshot String
+  slugSnapshot   String
+  isbnSnapshot   String?
+  coverSnapshot  String?
+  formatSnapshot String?
+  hsnCode        String?
+
+  quantity      Int
+  unitPricePaise Int  // tax-inclusive selling price per unit at time of sale
+  mrpPaise       Int
+  discountPaise  Int  @default(0)
+  taxPaise       Int  @default(0)
+  taxRateBp      Int  @default(0)
+  lineTotalPaise Int
+  fulfilledQty   Int  @default(0)
+  refundedQty    Int  @default(0)
+  cancelledQty   Int  @default(0)
+  // pending | packed | shipped | delivered | cancelled | returned
+  status         String @default("pending")
+  warehouseId    String?
+
+  @@index([orderId])
+  @@index([bookId])
+}
+
+model Payment {
+  id       String @id @default(cuid())
+  orderId  String
+  order    Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // Provider adapter key: phonepe | razorpay | stripe | cod | mock
+  provider String
+  // merchant_transaction_id we generate and send to the provider (idempotency).
+  merchantTransactionId String @unique
+  providerOrderId   String?
+  providerPaymentId String?
+  providerTxnId     String?
+  // initiated | pending | authorized | captured | failed | cancelled | expired
+  status     String @default("initiated")
+  method     String?  // UPI | CARD | NETBANKING | WALLET | COD
+  methodDetail String? // e.g. masked instrument / VPA handle — never full PAN
+  amountPaise Int
+  currency    String  @default("INR")
+  // Provider-side idempotency / dedupe
+  idempotencyKey String? @unique
+  // Response payloads are stored for reconciliation, already redacted of secrets.
+  requestPayload  String?
+  responsePayload String?
+  failureCode     String?
+  failureReason   String?
+  verifiedAt      DateTime?
+  capturedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  refunds   Refund[]
+  events    PaymentEvent[]
+
+  @@index([orderId])
+  @@index([status])
+  @@index([provider, providerPaymentId])
+}
+
+model PaymentEvent {
+  id         String  @id @default(cuid())
+  provider   String
+  // Provider webhook/event id — unique so replayed webhooks are no-ops.
+  eventId    String
+  eventType  String
+  orderId    String?
+  paymentId  String?
+  payment    Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  signatureVerified Boolean @default(false)
+  payload    String
+  processedAt DateTime?
+  processingError String?
+  createdAt  DateTime @default(now())
+
+  @@unique([provider, eventId])
+  @@index([orderId])
+}
+
+model Refund {
+  id       String @id @default(cuid())
+  orderId  String
+  order    Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentId String?
+  payment  Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  amountPaise Int
+  reason   String
+  // requested | processing | completed | failed
+  status   String @default("requested")
+  providerRefundId String?
+  providerResponse String?
+  actorId  String?
+  notes    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+
+  @@index([orderId])
+}
+
+model Shipment {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  carrier   String
+  trackingNumber String?
+  trackingUrl    String?
+  // pending | in_transit | out_for_delivery | delivered | failed | returned
+  status    String @default("pending")
+  service   String?
+  weightGrams Int?
+  labelUrl  String?
+  shippedAt DateTime?
+  deliveredAt DateTime?
+  estimatedDelivery DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([trackingNumber])
+}
+
+model OrderEvent {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // created | payment_verified | payment_failed | processing | packed | shipped |
+  // delivered | cancelled | refunded | returned | note | email_sent
+  type      String
+  message   String
+  actorId   String?
+  actorType String   @default("system") // system | customer | staff
+  isCustomerVisible Boolean @default(true)
+  metadata  String?
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+// ===================== PROMOTIONS =====================
+
+model Coupon {
+  id        String @id @default(cuid())
+  code      String @unique
+  description String?
+  // percent | fixed | free_shipping
+  type      String
+  valueBp   Int?    // basis points for percent (1000 = 10.00%)
+  valuePaise Int?   // amount for fixed
+  minOrderPaise    Int @default(0)
+  maxDiscountPaise Int?
+  // all | books | genres | first_order
+  scope     String @default("all")
+  appliesToBookIds  String? // JSON array
+  appliesToGenreIds String? // JSON array
+  firstOrderOnly    Boolean @default(false)
+  startsAt  DateTime?
+  endsAt    DateTime?
+  usageLimit Int?
+  perCustomerLimit Int? @default(1)
+  usedCount Int @default(0)
+  isAutomatic Boolean @default(false)
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  redemptions CouponRedemption[]
+
+  @@index([isActive, startsAt, endsAt])
+}
+
+model CouponRedemption {
+  id        String @id @default(cuid())
+  couponId  String
+  coupon    Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  orderId   String?
+  order     Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  email     String?
+  amountPaise Int
+  createdAt DateTime @default(now())
+
+  @@index([couponId, userId])
+  @@index([orderId])
+}
+
+model GiftCard {
+  id        String @id @default(cuid())
+  code      String @unique
+  codeHash  String @unique // lookup by hash; plaintext code never stored verifiably
+  initialPaise Int
+  balancePaise Int
+  currency  String @default("INR")
+  // active | redeemed | expired | disabled
+  status    String @default("active")
+  expiresAt DateTime?
+  purchaserEmail String?
+  recipientEmail String?
+  issuedByUserId String?
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+// ===================== REVIEWS =====================
+
+model Review {
+  id      String @id @default(cuid())
+  bookId  String
+  book    Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId String?
+  order   Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  rating  Int
+  title   String?
+  body    String
+  // pending | approved | rejected | hidden
+  status  String @default("pending")
+  isVerifiedPurchase Boolean @default(false)
+  helpfulCount Int @default(0)
+  reportCount  Int @default(0)
+  moderationNote String?
+  moderatedBy String?
+  moderatedAt DateTime?
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reports  ReviewReport[]
+  votes    ReviewVote[]
+
+  @@unique([userId, bookId])
+  @@index([bookId, status])
+  @@index([status, createdAt])
+}
+
+model ReviewVote {
+  id       String @id @default(cuid())
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  userId   String
+  value    Int    @default(1)
+  createdAt DateTime @default(now())
+
+  @@unique([reviewId, userId])
+}
+
+model ReviewReport {
+  id       String @id @default(cuid())
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  userId   String?
+  reason   String
+  detail   String?
+  // open | actioned | dismissed
+  status   String @default("open")
+  createdAt DateTime @default(now())
+
+  @@index([reviewId])
+  @@index([status])
+}
+
+// ===================== SUPPORT =====================
+
+model SupportTicket {
+  id       String @id @default(cuid())
+  reference String @unique
+  userId   String?
+  user     User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  orderId  String?
+  order    Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  email    String
+  name     String
+  // order_status | delivery | refund | product | account | other
+  category String @default("other")
+  subject  String
+  // open | pending_customer | pending_staff | resolved | closed
+  status   String @default("open")
+  priority String @default("normal")
+  assignedToId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  resolvedAt DateTime?
+
+  messages SupportMessage[]
+
+  @@index([status, priority])
+  @@index([userId])
+  @@index([orderId])
+}
+
+model SupportMessage {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId String?
+  author   User?  @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorType String @default("customer") // customer | staff | system
+  body     String
+  isInternal Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+// ===================== CONTENT / CMS =====================
+
+model BlogPost {
+  id        String @id @default(cuid())
+  slug      String @unique
+  title     String
+  excerpt   String?
+  body      String
+  coverImage String?
+  authorId  String?
+  author    User?  @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorName String?
+  category  String @default("book_review")
+  tags      String? // JSON array
+  // draft | scheduled | published | archived
+  status    String @default("draft")
+  publishedAt DateTime?
+  readingMinutes Int?
+  metaTitle String?
+  metaDescription String?
+  ogImage   String?
+  viewCount Int @default(0)
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([category])
+}
+
+model Banner {
+  id       String @id @default(cuid())
+  key      String @unique
+  title    String
+  subtitle String?
+  body     String?
+  imageUrl String?
+  ctaLabel String?
+  ctaHref  String?
+  // home_hero | home_strip | instagram_cta | announcement | checkout
+  placement String @default("home_hero")
+  theme    String?  // e.g. "ink" | "amber" | "forest"
+  sortOrder Int @default(0)
+  startsAt DateTime?
+  endsAt   DateTime?
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([placement, isActive])
+}
+
+model Faq {
+  id       String @id @default(cuid())
+  question String
+  answer   String
+  category String @default("general")
+  sortOrder Int @default(0)
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category, sortOrder])
+}
+
+model Testimonial {
+  id       String @id @default(cuid())
+  name     String
+  role     String?
+  quote    String
+  rating   Int?
+  avatarUrl String?
+  // Seeded/demo content must be labelled so it is never mistaken for real reviews.
+  isDemo   Boolean @default(false)
+  isActive Boolean @default(true)
+  sortOrder Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LegalDocument {
+  id      String @id @default(cuid())
+  slug    String @unique
+  title   String
+  body    String
+  version String @default("1.0")
+  // Legal copy ships as DRAFT and must be reviewed by a qualified professional.
+  requiresLegalReview Boolean @default(true)
+  effectiveAt DateTime?
+  updatedAt DateTime @updatedAt
+}
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+  // string | number | boolean | json
+  type  String @default("string")
+  group String @default("general")
+  label String?
+  description String?
+  isPublic Boolean @default(false) // safe to expose to the storefront
+  updatedAt DateTime @updatedAt
+
+  @@index([group])
+}
+
+model FeatureFlag {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  description String?
+  enabled     Boolean @default(false)
+  // Optional percentage rollout (0-100) for gradual release.
+  rolloutPercent Int  @default(100)
+  updatedAt   DateTime @updatedAt
+}
+
+// ===================== MARKETING / ANALYTICS / OPS =====================
+
+model NewsletterSubscriber {
+  id      String @id @default(cuid())
+  email   String @unique
+  userId  String? @unique
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name    String?
+  // pending | confirmed | unsubscribed
+  status  String @default("pending")
+  source  String?
+  confirmTokenHash String?
+  consentText String?
+  confirmedAt DateTime?
+  unsubscribedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Notification {
+  id      String @id @default(cuid())
+  userId  String?
+  user    User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // email | sms | whatsapp | push
+  channel String
+  template String
+  recipient String
+  subject String?
+  body    String?
+  // queued | sent | failed | skipped_consent
+  status  String @default("queued")
+  error   String?
+  entityType String?
+  entityId   String?
+  sentAt  DateTime?
+  readAt  DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model AnalyticsEvent {
+  id        String @id @default(cuid())
+  name      String
+  sessionId String?
+  userId    String?
+  path      String?
+  referrer  String?
+  // instagram | google | direct | email | affiliate | unknown
+  source    String?
+  medium    String?
+  campaign  String?
+  // Traffic arriving from Instagram Reels/Story deep links is first-class here.
+  isInstagram Boolean @default(false)
+  device    String?
+  props     String? // JSON
+  createdAt DateTime @default(now())
+
+  @@index([name, createdAt])
+  @@index([source])
+  @@index([isInstagram])
+  @@index([sessionId])
+}
+
+model AuditLog {
+  id         String @id @default(cuid())
+  actorId    String?
+  actor      User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail String?
+  action     String
+  entityType String
+  entityId   String?
+  summary    String
+  beforeJson String?
+  afterJson  String?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+model RateLimitBucket {
+  id        String   @id
+  count     Int      @default(0)
+  windowEnd DateTime
+}
+
+// ===================== SHIPPING & TAX CONFIG =====================
+
+model ShippingZone {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  countries String  @default("IN") // JSON array
+  states    String? // JSON array; null = all in country
+  priority  Int     @default(0)
+  isActive  Boolean @default(true)
+  methods   ShippingMethod[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ShippingMethod {
+  id            String @id @default(cuid())
+  zoneId        String
+  zone          ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  code          String @unique
+  label         String
+  description   String?
+  carrier       String?
+  ratePaise     Int    @default(0)
+  freeAbovePaise Int?
+  minDays       Int    @default(3)
+  maxDays       Int    @default(7)
+  isActive      Boolean @default(true)
+  sortOrder     Int    @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([zoneId])
+}
+
+model TaxRate {
+  id        String @id @default(cuid())
+  code      String @unique // matches Book.taxCategory
+  label     String
+  country   String @default("IN")
+  state     String?
+  rateBp    Int    // basis points: 500 = 5.00%
+  isInclusive Boolean @default(true)
+  hsnCode   String?
+  notes     String?
+  isActive  Boolean @default(true)
+  updatedAt DateTime @updatedAt
+
+  @@index([country, state])
+}
+
+// ===================== SHARING =====================
+
+/// A read-only, revocable link to somebody's wishlist.
+/// Tokens are random and hash-stored, expire by default, and can be revoked by
+/// the owner at any time — a shared list is still personal data.
+model WishlistShare {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String    @unique
+  title     String?
+  isRevoked Boolean   @default(false)
+  viewCount Int       @default(0)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// "Email me when this is back" / "tell me when it drops in price".
+/// Transactional by nature: it exists to send exactly one message, then the
+/// record is marked as sent. It is not a marketing list.
+model StockAlert {
+  id        String    @id @default(cuid())
+  bookId    String
+  book      Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String
+  // back_in_stock | price_drop
+  kind      String    @default("back_in_stock")
+  // pending | sent | cancelled | expired
+  status    String    @default("pending")
+  /** Price at the time the alert was requested, for price-drop comparison. */
+  watchPricePaise Int?
+  sentAt    DateTime?
+  notifiedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([bookId, email, kind])
+  @@index([bookId, status])
+  @@index([status])
+}

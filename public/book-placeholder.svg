@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 900" role="img" aria-label="Book cover placeholder">
+  <rect width="600" height="900" fill="#efe9dd"/>
+  <rect x="55" y="55" width="490" height="790" rx="10" fill="#d9cfbf"/>
+  <path d="M120 650h360v22H120zM120 700h270v14H120z" fill="#6b6257" opacity=".55"/>
+  <text x="300" y="405" text-anchor="middle" font-family="Georgia,serif" font-size="46" fill="#312d28">PAPERLANE</text>
+  <text x="300" y="455" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" letter-spacing="4" fill="#6b6257">BOOKS</text>
+</svg>
